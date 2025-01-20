@@ -113,3 +113,42 @@ Column(
   ],
 )
 ```
+
+### Current Features ✅
+
+- **Bullet Customization**
+  - Support any Widget as bullet content
+  - Configurable speed and channel height
+  - Multiple display areas (top, middle, bottom, full)
+
+### Planned Improvements 🚀
+
+1. **Movement Effects**
+   - [ ] Smooth enter/exit transitions
+   - [ ] Acceleration/deceleration effects
+   - [ ] Curved motion paths
+   - [ ] Dynamic speed adjustment
+
+2. **Channel Management**
+   - [ ] Smart channel allocation based on content length
+   - [ ] Dynamic channel height adjustment
+   - [ ] Optimized visual distribution
+
+3. **Interactive Features**
+   - [ ] Bullet click events
+   - [ ] Hover effects
+   - [ ] Gesture controls (drag to pause)
+   - [ ] Fixed position bullets
+
+4. **Special Effects**
+   - [ ] Priority system for important bullets
+   - [ ] Timeline-based special effects
+   - [ ] Custom motion paths
+   - [ ] Group animation effects
+
+## Known Issues
+
+1. Linear movement without smooth transitions
+2. Basic channel allocation might cause visual clustering
+3. Limited interaction capabilities
+4. No support for special bullet types (fixed position, special effects)

@@ -9,6 +9,21 @@ import 'package:quiver/collection.dart';
 
 const TAG = 'FlutterBarrage';
 
+enum Status {
+  idle,
+  loading,
+  playing,
+  switching,
+}
+
+// 添加弹幕区域枚举
+enum BarrageArea {
+  top, // 顶部区域
+  middle, // 中间区域
+  bottom, // 底部区域
+  full, // 铺满全屏
+}
+
 class BarrageWall extends StatefulWidget {
   final BarrageWallController controller;
 
@@ -38,6 +53,12 @@ class BarrageWall extends StatefulWidget {
   final bool debug;
   final bool selfCreatedController;
 
+  /// 弹幕显示区域
+  final BarrageArea area;
+
+  /// 每个区域的高度占比 (0.0 - 1.0)
+  final double areaHeightRatio;
+
   BarrageWall({
     List<Bullet>? bullets,
     BarrageWallController? controller,
@@ -51,8 +72,11 @@ class BarrageWall extends StatefulWidget {
     this.debug = false,
     this.safeBottomHeight = 0,
     this.speedCorrectionInMilliseconds = 3000,
+    this.area = BarrageArea.full,
+    this.areaHeightRatio = 0.3, // 默认每个区域占30%的高度
   })  : controller = controller ?? BarrageWallController.withBarrages(bullets, timelineNotifier: timelineNotifier),
-        selfCreatedController = controller == null {
+        selfCreatedController = controller == null,
+        assert(areaHeightRatio > 0 && areaHeightRatio <= 1.0) {
     if (controller != null) {
       this.controller.value = controller.value.size == 0 ? BarrageWallValue.fromList(bullets ?? []) : controller.value;
       this.controller.timelineNotifier = controller.timelineNotifier ?? timelineNotifier;
@@ -96,18 +120,32 @@ class BulletPos {
 class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
   late BarrageWallController _controller;
   Random _random = new Random();
-  // int _processed = 0;
-  // double? _width;
-  // double? _height;
-  double? _lastHeight; // 上一次计算通道个数的的高度记录
-  late Timer _cleaner;
+  double? _lastHeight;
 
   double? _maxBulletHeight;
   int? _totalChannels;
   int? _channelMask;
-  // Map<dynamic, BulletPos> _lastBullets = {};
   List<int> _speedCorrectionForChannels = [];
 
+  // 计算弹幕区域的范围
+  (double start, double end) _calculateAreaRange(double totalHeight) {
+    switch (widget.area) {
+      case BarrageArea.top:
+        return (0, totalHeight * widget.areaHeightRatio);
+      case BarrageArea.middle:
+        final areaHeight = totalHeight * widget.areaHeightRatio;
+        final start = (totalHeight - areaHeight) / 2;
+        return (start, start + areaHeight);
+      case BarrageArea.bottom:
+        final areaHeight = totalHeight * widget.areaHeightRatio;
+        return (totalHeight - areaHeight, totalHeight);
+      case BarrageArea.full:
+        return (0, totalHeight);
+    }
+  }
+
+  // 修改计算通道数的方法
+  @override
   int _calcSafeHeight(double height) {
     if (height.isInfinite) {
       final toHeight = context.size!.height;
@@ -115,12 +153,14 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
       return toHeight.toInt();
     } else {
       final safeBottomHeight = _controller.safeBottomHeight ?? widget.safeBottomHeight;
-      final toHeight = height - safeBottomHeight;
-      debugPrint('[$TAG] safe bottom height: $safeBottomHeight, set safe height to $toHeight');
-      if (toHeight < 0) {
-        throw Exception('safe bottom height is too large, it should be less than $height');
+      final (start, end) = _calculateAreaRange(height);
+      final areaHeight = end - start - safeBottomHeight;
+
+      debugPrint('[$TAG] area: ${widget.area}, height: $areaHeight');
+      if (areaHeight < 0) {
+        throw Exception('Invalid area height: $areaHeight');
       }
-      return toHeight.toInt();
+      return areaHeight.toInt();
     }
   }
 
@@ -194,7 +234,8 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
       animationController = AnimationController(duration: Duration(milliseconds: showTimeInMilliseconds), vsync: this);
       Animation<double> animation = new Tween<double>(begin: 0, end: end).animate(animationController..forward());
 
-      final channelHeightPos = nextChannel * _maxBulletHeight!;
+      final (areaStart, _) = _calculateAreaRange(widget.height);
+      final channelHeightPos = areaStart + (nextChannel * _maxBulletHeight!);
 
       /// make bullets not showed up in same time
       final fixedWidth = width + _random.nextInt(20).toDouble();
@@ -451,6 +492,10 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
   final Queue<BulletPos> _bulletPool = Queue();
   static const int POOL_SIZE = 50;
 
+  // 添加暂停状态
+  bool _isPaused = false;
+  bool get isPaused => _isPaused;
+
   // 初始化对象池
   void _initPool() {
     for (var i = 0; i < POOL_SIZE; i++) {
@@ -502,7 +547,7 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
   // 修改 tryFire 方法，添加容量限制
   @override
   void tryFire({List<Bullet> bullets = const []}) {
-    if (_status != Status.playing) return;
+    if (_status != Status.playing || _isPaused) return;
 
     // 检查容量限制
     if (_widgets.length >= maxBullets) {
@@ -583,6 +628,7 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     try {
       _status = Status.switching;
       _error = null;
+      _isPaused = false; // 重置暂停状态
 
       // 停止当前动画和清理资源
       if (clearOld) {
@@ -600,6 +646,48 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
       _error = e.toString();
       _status = Status.idle;
       debugPrint('[$TAG] Error switching content: $e');
+    }
+  }
+
+  // 暂停所有弹幕动画
+  void pause() {
+    if (_isPaused) return;
+    _isPaused = true;
+
+    // 暂停所有动画
+    for (final controller in _widgets.keys) {
+      controller.stop();
+    }
+
+    // 暂停定时器
+    _timer?.cancel();
+  }
+
+  // 恢复所有弹幕动画
+  void resume() {
+    if (!_isPaused) return;
+    _isPaused = false;
+
+    // 恢复所有动画
+    for (final controller in _widgets.keys) {
+      controller.forward();
+    }
+
+    // 重新启动定时器
+    if (timelineNotifier == null) {
+      _timer = Timer.periodic(const Duration(milliseconds: 100), (Timer timer) async {
+        if (_isDisposed || _isPaused) {
+          timer.cancel();
+          return;
+        }
+
+        if (value.size == value.processedSize) {
+          return;
+        }
+
+        timeline += 100;
+        tryFire();
+      });
     }
   }
 
@@ -716,12 +804,4 @@ class Bullet implements Comparable<Bullet> {
   int compareTo(Bullet other) {
     return showTime.compareTo(other.showTime);
   }
-}
-
-// 添加状态枚举
-enum Status {
-  idle,
-  loading,
-  playing,
-  switching,
 }
