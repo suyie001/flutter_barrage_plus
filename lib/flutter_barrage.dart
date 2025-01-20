@@ -96,9 +96,18 @@ class BulletPos {
   bool released = false;
   int lifetime;
   Widget widget;
+  double height;
+  double estimatedWidth;
 
-  BulletPos({required this.id, required this.channel, required this.position, required this.width, required this.widget})
-      : lifetime = DateTime.now().millisecondsSinceEpoch;
+  BulletPos({
+    required this.id,
+    required this.channel,
+    required this.position,
+    required this.width,
+    required this.widget,
+    required this.height,
+    required this.estimatedWidth,
+  }) : lifetime = DateTime.now().millisecondsSinceEpoch;
 
   updateWith({required double position, double width = 0}) {
     this.position = position;
@@ -117,6 +126,21 @@ class BulletPos {
   }
 }
 
+/// 通道信息类
+class ChannelInfo {
+  double height; // 通道高度
+  double yPosition; // 通道Y轴位置
+  bool occupied; // 是否被占用
+  double lastBulletEnd; // 最后一个弹幕的预计结束位置
+
+  ChannelInfo({
+    required this.height,
+    required this.yPosition,
+    this.occupied = false,
+    this.lastBulletEnd = 0,
+  });
+}
+
 class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
   late BarrageWallController _controller;
   Random _random = new Random();
@@ -126,6 +150,69 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
   int? _totalChannels;
   int? _channelMask;
   List<int> _speedCorrectionForChannels = [];
+
+  // 通道信息列表
+  List<ChannelInfo> _channels = [];
+
+  // 初始化通道
+  void _initializeChannels() {
+    _channels.clear();
+    final (areaStart, areaEnd) = _calculateAreaRange(widget.height);
+    final availableHeight = areaEnd - areaStart;
+
+    // 初始化默认通道
+    double currentY = areaStart;
+    while (currentY + widget.maxBulletHeight <= areaEnd) {
+      _channels.add(ChannelInfo(
+        height: widget.maxBulletHeight,
+        yPosition: currentY,
+      ));
+      currentY += widget.maxBulletHeight;
+    }
+  }
+
+  // 估算弹幕宽度
+  double _estimateBulletWidth(Widget bullet) {
+    // 使用 TextPainter 估算文本宽度
+    if (bullet is Text) {
+      final textPainter = TextPainter(
+        text: TextSpan(text: bullet.data, style: bullet.style),
+        maxLines: 1,
+        textDirection: TextDirection.ltr,
+      )..layout();
+      return textPainter.width + 20; // 添加一些padding
+    }
+    // 其他类型Widget使用默认宽度
+    return 100.0;
+  }
+
+  // 智能选择通道
+  int? _selectChannel(double bulletWidth) {
+    if (_channels.isEmpty) return null;
+
+    // 计算最佳通道
+    int? bestChannel;
+    double bestScore = double.infinity;
+
+    for (int i = 0; i < _channels.length; i++) {
+      if (_channels[i].occupied) continue;
+
+      // 计算该通道的拥挤度分数
+      double score = _channels[i].lastBulletEnd;
+
+      // 考虑相邻通道的情况
+      if (i > 0) score += _channels[i - 1].lastBulletEnd * 0.5;
+      if (i < _channels.length - 1) score += _channels[i + 1].lastBulletEnd * 0.5;
+
+      // 更新最佳通道
+      if (score < bestScore) {
+        bestScore = score;
+        bestChannel = i;
+      }
+    }
+
+    return bestChannel;
+  }
 
   // 计算弹幕区域的范围
   (double start, double end) _calculateAreaRange(double totalHeight) {
@@ -208,43 +295,57 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
     }
   }
 
+  // 修改弹幕处理方法
   void _handleBullets(
     BuildContext context, {
     required List<Bullet> bullets,
     required double width,
     double? end,
   }) {
-    // cannot get the width of widget when not rendered, make a twice longer width for now
     end ??= width * 2;
 
-    _releaseChannels();
-    if (widget.debug) debugPrint('[$TAG] handle bullets: ${bullets.length} - ${_controller.usedChannel.toRadixString(2)}');
-    bullets.forEach((Bullet bullet) {
-      AnimationController animationController;
+    // 确保通道已初始化
+    if (_channels.isEmpty) {
+      _initializeChannels();
+    }
 
-      final nextChannel = _nextChannel();
-      if (nextChannel != null) {}
-
-      /// discard bullets do not have available channel and massive mode is not enabled too
-      if (nextChannel == null) {
-        return;
+    // 更新通道状态
+    for (var channel in _channels) {
+      channel.occupied = false;
+      if (channel.lastBulletEnd > 0) {
+        channel.lastBulletEnd -= 16.0; // 随时间减少占用
+        if (channel.lastBulletEnd < 0) channel.lastBulletEnd = 0;
       }
+    }
 
-      final showTimeInMilliseconds = widget.speed * 2 * 1000 - _speedCorrectionForChannels[nextChannel];
-      animationController = AnimationController(duration: Duration(milliseconds: showTimeInMilliseconds), vsync: this);
-      Animation<double> animation = new Tween<double>(begin: 0, end: end).animate(animationController..forward());
+    bullets.forEach((Bullet bullet) {
+      // 估算弹幕宽度
+      final estimatedWidth = _estimateBulletWidth(bullet.child);
 
-      final (areaStart, _) = _calculateAreaRange(widget.height);
-      final channelHeightPos = areaStart + (nextChannel * _maxBulletHeight!);
+      // 选择最佳通道
+      final channelIndex = _selectChannel(estimatedWidth);
+      if (channelIndex == null) return;
 
-      /// make bullets not showed up in same time
-      final fixedWidth = width + _random.nextInt(20).toDouble();
+      final channel = _channels[channelIndex];
+      channel.occupied = true;
+      channel.lastBulletEnd = width + estimatedWidth;
+
+      // 创建动画
+      final showTimeInMilliseconds = widget.speed * 2 * 1000 - _speedCorrectionForChannels[channelIndex];
+
+      final animationController = AnimationController(
+        duration: Duration(milliseconds: showTimeInMilliseconds),
+        vsync: this,
+      );
+
+      Animation<double> animation = Tween<double>(begin: 0, end: end).animate(animationController..forward());
+
       final bulletWidget = AnimatedBuilder(
         animation: animation,
         child: bullet.child,
         builder: (BuildContext context, Widget? child) {
           if (animation.isCompleted) {
-            _controller.lastBullets[nextChannel]?.updateWith(position: double.infinity);
+            _controller.lastBullets[channelIndex]?.updateWith(position: double.infinity);
             return const SizedBox();
           }
 
@@ -257,8 +358,8 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
               widgetWidth = renderBox!.size.width;
 
               /// 通过计算出的 widget width 在判断弹幕完全移出了可视区域
-              if (widgetWidth > 0 && animation.value > (fixedWidth + widgetWidth)) {
-                _controller.lastBullets[nextChannel]?.updateWith(position: double.infinity);
+              if (widgetWidth > 0 && animation.value > (width + widgetWidth)) {
+                _controller.lastBullets[channelIndex]?.updateWith(position: double.infinity);
                 return const SizedBox();
               }
             }
@@ -267,26 +368,32 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
 //          debugPrint(
 //              '[$TAG] ${_controller.lastBullets[nextChannel]?.id} == ${context.hashCode} $child pos: ${animation.value}');
           // 【通道不为空】或者【通道的最后元素】之后出现了可以新增的元素
-          if (!_controller.lastBullets.containsKey(nextChannel) ||
-              (_controller.lastBullets.containsKey(nextChannel) && _controller.lastBullets[nextChannel]!.position > animation.value)) {
-            _controller.lastBullets[nextChannel] =
-                BulletPos(id: context.hashCode, channel: nextChannel, position: animation.value, width: widgetWidth, widget: child!);
+          if (!_controller.lastBullets.containsKey(channelIndex) ||
+              (_controller.lastBullets.containsKey(channelIndex) && _controller.lastBullets[channelIndex]!.position > animation.value)) {
+            _controller.lastBullets[channelIndex] = BulletPos(
+              id: context.hashCode,
+              channel: channelIndex,
+              position: animation.value,
+              width: widgetWidth,
+              height: channel.height,
+              estimatedWidth: estimatedWidth,
+              widget: child!,
+            );
 //            debugPrint("[$TAG] add ${_controller.lastBullets[nextChannel]} - ${context.hashCode}");
-          } else if (_controller.lastBullets[nextChannel]!.id == context.hashCode) {
+          } else if (_controller.lastBullets[channelIndex]!.id == context.hashCode) {
             // 当前元素是最后元素，更新相关信息
-            _controller.lastBullets[nextChannel]?.updateWith(position: animation.value, width: widgetWidth);
+            _controller.lastBullets[channelIndex]?.updateWith(position: animation.value, width: widgetWidth);
           } // 其他情况直接更新页面元素
 
-          final widthPos = fixedWidth - animation.value;
+          final widthPos = width - animation.value;
           return Transform.translate(
-            offset: Offset(widthPos, channelHeightPos.toDouble()),
+            offset: Offset(widthPos, channel.yPosition),
             child: child,
           );
         },
       );
-      _controller.widgets.putIfAbsent(animationController, () => bulletWidget);
 
-      // 添加动画监听器
+      _controller.widgets.putIfAbsent(animationController, () => bulletWidget);
       _controller._setupAnimationListener(animationController);
     });
   }
@@ -351,6 +458,7 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
     if (widget.selfCreatedController) {
       _controller.dispose();
     }
+    _channels.clear();
     super.dispose();
   }
 
@@ -504,6 +612,8 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
         channel: -1,
         position: 0,
         width: 0,
+        height: 0,
+        estimatedWidth: 0,
         widget: const SizedBox(),
       ));
     }
@@ -515,6 +625,8 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     required int channel,
     required double position,
     required double width,
+    required double height,
+    required double estimatedWidth,
     required Widget widget,
   }) {
     final bulletPos = _bulletPool.isEmpty
@@ -523,6 +635,8 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
             channel: channel,
             position: position,
             width: width,
+            height: height,
+            estimatedWidth: estimatedWidth,
             widget: widget,
           )
         : _bulletPool.removeFirst()
@@ -530,6 +644,8 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
       ..channel = channel
       ..position = position
       ..width = width
+      ..height = height
+      ..estimatedWidth = estimatedWidth
       ..widget = widget
       ..released = false
       ..lifetime = DateTime.now().millisecondsSinceEpoch;
