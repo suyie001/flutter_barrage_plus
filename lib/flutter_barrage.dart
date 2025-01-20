@@ -443,6 +443,129 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
   String? _error;
   String? get error => _error;
 
+  // 添加容量限制配置
+  static const int DEFAULT_MAX_BULLETS = 200;
+  final int maxBullets;
+
+  // 添加对象池
+  final Queue<BulletPos> _bulletPool = Queue();
+  static const int POOL_SIZE = 50;
+
+  // 初始化对象池
+  void _initPool() {
+    for (var i = 0; i < POOL_SIZE; i++) {
+      _bulletPool.add(BulletPos(
+        id: -1,
+        channel: -1,
+        position: 0,
+        width: 0,
+        widget: const SizedBox(),
+      ));
+    }
+  }
+
+  // 从对象池获取对象
+  BulletPos _obtainBulletPos({
+    required int id,
+    required int channel,
+    required double position,
+    required double width,
+    required Widget widget,
+  }) {
+    final bulletPos = _bulletPool.isEmpty
+        ? BulletPos(
+            id: id,
+            channel: channel,
+            position: position,
+            width: width,
+            widget: widget,
+          )
+        : _bulletPool.removeFirst()
+      ..id = id
+      ..channel = channel
+      ..position = position
+      ..width = width
+      ..widget = widget
+      ..released = false
+      ..lifetime = DateTime.now().millisecondsSinceEpoch;
+
+    return bulletPos;
+  }
+
+  // 回收对象到对象池
+  void _recycleBulletPos(BulletPos bulletPos) {
+    if (_bulletPool.length < POOL_SIZE) {
+      _bulletPool.add(bulletPos);
+    }
+  }
+
+  // 修改 tryFire 方法，添加容量限制
+  @override
+  void tryFire({List<Bullet> bullets = const []}) {
+    if (_status != Status.playing) return;
+
+    // 检查容量限制
+    if (_widgets.length >= maxBullets) {
+      debugPrint('[$TAG] Reached max bullets limit: $maxBullets');
+      return;
+    }
+
+    final key = Duration(milliseconds: timeline).inMinutes;
+    final exists = value.bullets._map.containsKey(key);
+
+    if (exists || bullets.isNotEmpty) {
+      List<Bullet> toBePrecessed =
+          value.bullets._map[key]?.where((barrage) => barrage.showTime > value.showedTimeBefore && barrage.showTime <= timeline).toList() ?? [];
+
+      // 限制待处理弹幕数量
+      final remainingCapacity = maxBullets - _widgets.length;
+      if (toBePrecessed.length + bullets.length > remainingCapacity) {
+        final totalBullets = [...toBePrecessed, ...bullets];
+        toBePrecessed = totalBullets.take(remainingCapacity).toList();
+      }
+
+      if (toBePrecessed.isNotEmpty) {
+        value = value.copyWith(
+          showedTimeBefore: timeline,
+          waitingList: toBePrecessed,
+          processedSize: toBePrecessed.length,
+        );
+      }
+    }
+  }
+
+  // 优化资源释放
+  @override
+  Future<void> clear() async {
+    await _disposeAnimationControllers();
+
+    // 回收所有 BulletPos 对象
+    _lastBullets.values.forEach(_recycleBulletPos);
+    _lastBullets.clear();
+
+    _usedChannel = 0;
+    timeline = 0;
+    _status = Status.idle;
+  }
+
+  // 添加错误处理和状态管理方法
+  void _handleError(String message, [Exception? error]) {
+    _error = message;
+    _status = Status.idle;
+    debugPrint('[$TAG] Error: $message${error != null ? ', $error' : ''}');
+  }
+
+  bool get canAcceptMoreBullets => _status == Status.playing && _widgets.length < maxBullets;
+
+  // 修改发送弹幕方法
+  void send(List<Bullet> bullets) {
+    if (!canAcceptMoreBullets) {
+      _handleError('Cannot accept more bullets: status=$_status, count=${_widgets.length}');
+      return;
+    }
+    tryFire(bullets: bullets);
+  }
+
   // 优化资源释放
   Future<void> _disposeAnimationControllers() async {
     for (final controller in _widgets.keys) {
@@ -480,45 +603,21 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     }
   }
 
-  // 优化 clear 方法
-  @override
-  Future<void> clear() async {
-    await _disposeAnimationControllers();
-    _lastBullets.clear();
-    _usedChannel = 0;
-    timeline = 0;
+  BarrageWallController({
+    List<Bullet>? bullets,
+    this.timelineNotifier,
+    this.maxBullets = DEFAULT_MAX_BULLETS,
+  }) : super(BarrageWallValue.fromList(bullets ?? const [])) {
+    _initPool();
   }
 
-  // 优化资源释放
-  void _setupAnimationListener(AnimationController controller) {
-    controller.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        controller.dispose();
-        _widgets.remove(controller);
-      }
-    });
+  BarrageWallController.withBarrages(
+    List<Bullet>? bullets, {
+    this.timelineNotifier,
+    this.maxBullets = DEFAULT_MAX_BULLETS,
+  }) : super(BarrageWallValue.fromList(bullets ?? const [])) {
+    _initPool();
   }
-
-  // 修改 tryFire 方法
-  void tryFire({List<Bullet> bullets = const []}) {
-    if (_status != Status.playing) return;
-
-    final key = Duration(milliseconds: timeline).inMinutes;
-    final exists = value.bullets._map.containsKey(key);
-
-    if (exists || bullets.isNotEmpty) {
-      List<Bullet> toBePrecessed =
-          value.bullets._map[key]?.where((barrage) => barrage.showTime > value.showedTimeBefore && barrage.showTime <= timeline).toList() ?? [];
-
-      if (toBePrecessed.isNotEmpty || bullets.isNotEmpty) {
-        value = value.copyWith(showedTimeBefore: timeline, waitingList: toBePrecessed..addAll(bullets), processedSize: toBePrecessed.length);
-      }
-    }
-  }
-
-  BarrageWallController({List<Bullet>? bullets, this.timelineNotifier}) : super(BarrageWallValue.fromList(bullets ?? const []));
-
-  BarrageWallController.withBarrages(List<Bullet>? bullets, {this.timelineNotifier}) : super(BarrageWallValue.fromList(bullets ?? const []));
 
   Future<void> initialize() async {
     final Completer<void> initializingCompleter = Completer<void>();
@@ -577,10 +676,6 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     enabledNotifier.value = true;
   }
 
-  send(List<Bullet> bullets) {
-    tryFire(bullets: bullets);
-  }
-
   @override
   Future<void> dispose() async {
     if (!_isDisposed) {
@@ -591,6 +686,16 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     timelineNotifier?.dispose();
     enabledNotifier.dispose();
     super.dispose();
+  }
+
+  // 添加 _setupAnimationListener 方法
+  void _setupAnimationListener(AnimationController controller) {
+    controller.addStatusListener((status) {
+      if (status == AnimationStatus.completed) {
+        controller.dispose();
+        _widgets.remove(controller);
+      }
+    });
   }
 }
 
