@@ -3,12 +3,12 @@ description: An example project for flutter_barrage.
 version: 1.0.0+1
 
 environment:
-  sdk: '>=2.16.2 <4.0.0'
+  sdk: '>=3.0.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
-  chewie: ^1.7.0
+  chewie: 
 
   flutter_barrage:
     path: ../
