@@ -3,9 +3,11 @@ library flutter_barrage;
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:quiver/collection.dart';
+import 'package:flutter/rendering.dart';
 
 const TAG = 'FlutterBarrage';
 
@@ -154,11 +156,17 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
   // 通道信息列表
   List<ChannelInfo> _channels = [];
 
+  // 添加帧率控制
+  static const int TARGET_FPS = 60;
+  int _lastFrameTime = 0;
+
+  // 弹幕信息列表
+  final List<BulletInfo> _bulletInfos = [];
+
   // 初始化通道
   void _initializeChannels() {
     _channels.clear();
     final (areaStart, areaEnd) = _calculateAreaRange(widget.height);
-    final availableHeight = areaEnd - areaStart;
 
     // 初始化默认通道
     double currentY = areaStart;
@@ -232,7 +240,6 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
   }
 
   // 修改计算通道数的方法
-  @override
   int _calcSafeHeight(double height) {
     if (height.isInfinite) {
       final toHeight = context.size!.height;
@@ -248,50 +255,6 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
         throw Exception('Invalid area height: $areaHeight');
       }
       return areaHeight.toInt();
-    }
-  }
-
-  /// null means no available channels exists
-  int? _nextChannel() {
-    final _randomSeed = _totalChannels! - 1;
-
-    if (_controller.usedChannel ^ _channelMask! == 0) {
-      return null;
-    }
-
-    var times = 1;
-    var channel = _randomSeed == 0 ? 0 : _random.nextInt(_randomSeed);
-    var channelCode = 1 << channel;
-
-    while (_controller.usedChannel & channelCode != 0 && _controller.usedChannel ^ _channelMask! != 0) {
-      times++;
-      channel = channel >= _totalChannels! ? 0 : channel + 1;
-      channelCode = 1 << channel;
-
-      /// return random channel if no channels available and massive mode is enabled
-      if (times > _totalChannels!) {
-        if (widget.massiveMode == true) {
-          return _random.nextInt(_randomSeed);
-        }
-        return null;
-      }
-    }
-    // _controller.usedChannel |= (1 << channel);
-    _controller.updateChannel((usedChannel) => usedChannel |= (1 << channel));
-    return channel;
-  }
-
-  _releaseChannels() {
-//    final now = DateTime.now().millisecondsSinceEpoch;
-    for (int i = 0; i < _controller.lastBullets.length; i++) {
-      final channel = _controller.lastBullets.keys.elementAt(i);
-      var isNotReleased = !_controller.lastBullets[channel]!.released;
-      var liveTooLong = false; // now - _controller.lastBullets[channel].lifetime > widget.speed * 2 * 1000 + widget.speedCorrectionInMilliseconds;
-      if (liveTooLong || (isNotReleased && _controller.lastBullets[channel]!.hasExtraSpace)) {
-        _controller.lastBullets[channel]!.released = true;
-        // _controller.usedChannel &= _channelMask! ^ 1 << channel;
-        _controller.updateChannel((usedChannel) => usedChannel &= _channelMask! ^ 1 << channel);
-      }
     }
   }
 
@@ -318,6 +281,13 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
       }
     }
 
+    // 帧率控制
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastFrameTime < (1000 / TARGET_FPS)) {
+      return;
+    }
+    _lastFrameTime = now;
+
     bullets.forEach((Bullet bullet) {
       // 估算弹幕宽度
       final estimatedWidth = _estimateBulletWidth(bullet.child);
@@ -330,6 +300,17 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
       channel.occupied = true;
       channel.lastBulletEnd = width + estimatedWidth;
 
+      // 创建弹幕信息
+      final bulletInfo = BulletInfo(
+        child: bullet.child,
+        position: Offset(width, channel.yPosition),
+        size: Size(estimatedWidth, channel.height),
+        context: context,
+      );
+
+      // 添加到渲染列表
+      _bulletInfos.add(bulletInfo);
+
       // 创建动画
       final showTimeInMilliseconds = widget.speed * 2 * 1000 - _speedCorrectionForChannels[channelIndex];
 
@@ -338,63 +319,23 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
         vsync: this,
       );
 
-      Animation<double> animation = Tween<double>(begin: 0, end: end).animate(animationController..forward());
+      Animation<double> animation = Tween<double>(
+        begin: width,
+        end: -estimatedWidth,
+      ).animate(animationController..forward());
 
-      final bulletWidget = AnimatedBuilder(
-        animation: animation,
-        child: bullet.child,
-        builder: (BuildContext context, Widget? child) {
-          if (animation.isCompleted) {
-            _controller.lastBullets[channelIndex]?.updateWith(position: double.infinity);
-            return const SizedBox();
-          }
+      // 更新弹幕位置
+      animation.addListener(() {
+        bulletInfo.position = Offset(animation.value, channel.yPosition);
+      });
 
-          double widgetWidth = 0.0;
-
-          /// get current widget width
-          if (child != null) {
-            final renderBox = context.findRenderObject() as RenderBox?;
-            if (renderBox?.hasSize ?? false) {
-              widgetWidth = renderBox!.size.width;
-
-              /// 通过计算出的 widget width 在判断弹幕完全移出了可视区域
-              if (widgetWidth > 0 && animation.value > (width + widgetWidth)) {
-                _controller.lastBullets[channelIndex]?.updateWith(position: double.infinity);
-                return const SizedBox();
-              }
-            }
-          }
-
-//          debugPrint(
-//              '[$TAG] ${_controller.lastBullets[nextChannel]?.id} == ${context.hashCode} $child pos: ${animation.value}');
-          // 【通道不为空】或者【通道的最后元素】之后出现了可以新增的元素
-          if (!_controller.lastBullets.containsKey(channelIndex) ||
-              (_controller.lastBullets.containsKey(channelIndex) && _controller.lastBullets[channelIndex]!.position > animation.value)) {
-            _controller.lastBullets[channelIndex] = BulletPos(
-              id: context.hashCode,
-              channel: channelIndex,
-              position: animation.value,
-              width: widgetWidth,
-              height: channel.height,
-              estimatedWidth: estimatedWidth,
-              widget: child!,
-            );
-//            debugPrint("[$TAG] add ${_controller.lastBullets[nextChannel]} - ${context.hashCode}");
-          } else if (_controller.lastBullets[channelIndex]!.id == context.hashCode) {
-            // 当前元素是最后元素，更新相关信息
-            _controller.lastBullets[channelIndex]?.updateWith(position: animation.value, width: widgetWidth);
-          } // 其他情况直接更新页面元素
-
-          final widthPos = width - animation.value;
-          return Transform.translate(
-            offset: Offset(widthPos, channel.yPosition),
-            child: child,
-          );
-        },
-      );
-
-      _controller.widgets.putIfAbsent(animationController, () => bulletWidget);
-      _controller._setupAnimationListener(animationController);
+      // 动画结束时清理
+      animationController.addStatusListener((status) {
+        if (status == AnimationStatus.completed) {
+          _bulletInfos.remove(bulletInfo);
+          animationController.dispose();
+        }
+      });
     });
   }
 
@@ -459,29 +400,49 @@ class _BarrageState extends State<BarrageWall> with TickerProviderStateMixin {
       _controller.dispose();
     }
     _channels.clear();
+    for (var bullet in _bulletInfos) {
+      bullet.dispose();
+    }
+    _bulletInfos.clear();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Stack(fit: StackFit.expand, children: <Widget>[
-      if (widget.debug)
-        Container(
-            color: Colors.lightBlueAccent.withOpacity(0.7),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.end, children: <Widget>[
-              Text('BarrageWallValue: ${_controller.value}'),
-              Text('TimelineNotifier: ${_controller.timelineNotifier?.value}'),
-              Text('Timeline: ${_controller.timeline}'),
-              Text('Bullets: ${_controller.widgets.length}'),
-              Text('UsedChannels: ${_controller.usedChannel.toRadixString(2)}'),
-              Text('LastBullets[0]: ${_controller.lastBullets[0]}'),
-            ])),
-      widget.child,
-      if (_controller.isEnabled)
-        Stack(fit: StackFit.loose, children: <Widget>[..._controller.widgets.values]
-            // ..addAll(_widgets.values ?? const SizedBox()),
-            ),
-    ]);
+    return ValueListenableBuilder<bool>(
+      valueListenable: _controller.visibilityNotifier,
+      builder: (context, isVisible, child) {
+        if (!isVisible) {
+          return const SizedBox(); // 不显示弹幕
+        }
+
+        return Stack(
+          children: [
+            // 实际渲染的弹幕
+            ..._bulletInfos
+                .map((bullet) => Positioned(
+                      left: bullet.position.dx,
+                      top: bullet.position.dy,
+                      child: SizedBox(
+                        width: bullet.size.width,
+                        height: bullet.size.height,
+                        child: bullet.child,
+                      ),
+                    ))
+                .toList(),
+
+            // 用于调试的 CustomPaint
+            if (widget.debug)
+              CustomPaint(
+                painter: DebugPainter(
+                  bullets: _bulletInfos,
+                ),
+                size: Size(widget.width, widget.height),
+              ),
+          ],
+        );
+      },
+    );
   }
 }
 
@@ -603,6 +564,10 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
   // 添加暂停状态
   bool _isPaused = false;
   bool get isPaused => _isPaused;
+
+  // 添加显示控制
+  final ValueNotifier<bool> visibilityNotifier = ValueNotifier(true);
+  bool get isVisible => visibilityNotifier.value;
 
   // 初始化对象池
   void _initPool() {
@@ -807,6 +772,31 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     }
   }
 
+  // 显示弹幕
+  void show() {
+    if (!visibilityNotifier.value) {
+      visibilityNotifier.value = true;
+      resume(); // 恢复动画
+    }
+  }
+
+  // 隐藏弹幕
+  void hide() {
+    if (visibilityNotifier.value) {
+      visibilityNotifier.value = false;
+      pause(); // 暂停动画
+    }
+  }
+
+  // 切换显示状态
+  void toggleVisibility() {
+    if (visibilityNotifier.value) {
+      hide();
+    } else {
+      show();
+    }
+  }
+
   BarrageWallController({
     List<Bullet>? bullets,
     this.timelineNotifier,
@@ -870,12 +860,12 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     tryFire();
   }
 
-  disable() {
+  void disable() {
     debugPrint("[$TAG] disable barrage ... current: $enabledNotifier");
     enabledNotifier.value = false;
   }
 
-  enable() {
+  void enable() {
     debugPrint("[$TAG] enable barrage ... current: $enabledNotifier");
     enabledNotifier.value = true;
   }
@@ -889,17 +879,8 @@ class BarrageWallController extends ValueNotifier<BarrageWallValue> {
     _isDisposed = true;
     timelineNotifier?.dispose();
     enabledNotifier.dispose();
+    visibilityNotifier.dispose();
     super.dispose();
-  }
-
-  // 添加 _setupAnimationListener 方法
-  void _setupAnimationListener(AnimationController controller) {
-    controller.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        controller.dispose();
-        _widgets.remove(controller);
-      }
-    });
   }
 }
 
@@ -920,4 +901,88 @@ class Bullet implements Comparable<Bullet> {
   int compareTo(Bullet other) {
     return showTime.compareTo(other.showTime);
   }
+}
+
+// 修改 BulletInfo 类
+class BulletInfo {
+  final Widget child;
+  Offset position;
+  Size size;
+  final BuildContext context;
+
+  // 使用 GlobalKey 来获取 RenderBox
+  final GlobalKey _key = GlobalKey();
+  RenderBox? _renderBox;
+
+  BulletInfo({
+    required this.child,
+    required this.position,
+    required this.size,
+    required this.context,
+  });
+
+  void render(Canvas canvas) {
+    canvas.save();
+    canvas.translate(position.dx, position.dy);
+
+    if (_renderBox == null) {
+      final context = _key.currentContext;
+      if (context != null) {
+        _renderBox = context.findRenderObject() as RenderBox?;
+      }
+    }
+
+    if (_renderBox != null && _renderBox!.hasSize) {
+      // 使用 layer 进行渲染
+      final layer = _renderBox!.layer;
+      if (layer != null) {
+        layer.addToScene(SceneBuilder());
+      }
+    } else {
+      // 降级方案：渲染占位符
+      final paint = Paint()
+        ..color = Colors.grey.withOpacity(0.5)
+        ..style = PaintingStyle.fill;
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, size.width, size.height),
+        paint,
+      );
+    }
+
+    canvas.restore();
+  }
+
+  void dispose() {
+    _renderBox = null;
+  }
+}
+
+// 添加调试绘制器
+class DebugPainter extends CustomPainter {
+  final List<BulletInfo> bullets;
+
+  DebugPainter({
+    required this.bullets,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (var bullet in bullets) {
+      final paint = Paint()
+        ..color = Colors.red.withOpacity(0.3)
+        ..style = PaintingStyle.stroke;
+      canvas.drawRect(
+        Rect.fromLTWH(
+          bullet.position.dx,
+          bullet.position.dy,
+          bullet.size.width,
+          bullet.size.height,
+        ),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(DebugPainter oldDelegate) => true;
 }
